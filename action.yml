@@ -1,0 +1,30 @@
+name: 'vcpkg Binary Cache'
+description: 'Per-package binary caching for vcpkg using GitHub Actions cache'
+
+branding:
+  icon: 'package'
+  color: 'blue'
+
+inputs:
+  token:
+    description: 'GitHub token for listing existing cache entries'
+    default: ${{ github.token }}
+  cache-key-prefix:
+    description: 'Prefix for all cache keys (useful to isolate cache sets)'
+    default: 'vcpkg-pkg'
+  vcpkg-root:
+    description: 'Path to vcpkg checkout. Cache is scoped to its commit hash — updating vcpkg invalidates all entries.'
+    required: false
+  overlay-ports:
+    description: 'Path to overlay ports directory. Cache is scoped to a content hash — changing any overlay file invalidates all entries.'
+    required: false
+
+outputs:
+  archives-dir:
+    description: 'Absolute path to the vcpkg binary archives directory'
+
+runs:
+  using: 'node24'
+  main: 'dist/restore/index.js'
+  post: 'dist/save/index.js'
+  post-if: 'always()'
