@@ -5,11 +5,13 @@ const { execSync } = require('child_process');
 const {
   snapshotArchives,
   hashFromRelPath,
+  hashFromCacheKey,
   cacheKeyFor,
   getArchivesDir,
   hashDirectory,
   computeScope,
   getVcpkgCommit,
+  parseVcpkgStatus,
 } = require('../src/common');
 
 // ---------------------------------------------------------------------------
@@ -48,15 +50,56 @@ describe('hashFromRelPath', () => {
 });
 
 // ---------------------------------------------------------------------------
-describe('cacheKeyFor', () => {
-  test('joins prefix and hash without scope', () => {
-    expect(cacheKeyFor('vcpkg-pkg', '', 'abc123')).toBe('vcpkg-pkg-abc123');
+describe('hashFromCacheKey', () => {
+  const hash = 'ab' + 'cd'.repeat(31);
+
+  test('extracts hash from unnamed key', () => {
+    expect(hashFromCacheKey(`vcpkg-pkg-${hash}`)).toBe(hash);
   });
 
-  test('includes scope when provided', () => {
-    expect(cacheKeyFor('vcpkg-pkg', 'deadbeef01234567', 'abc123')).toBe(
-      'vcpkg-pkg-deadbeef01234567-abc123',
+  test('extracts hash from scoped unnamed key', () => {
+    expect(hashFromCacheKey(`vcpkg-pkg-a1b2c3d4-${hash}`)).toBe(hash);
+  });
+
+  test('extracts hash from named key', () => {
+    expect(hashFromCacheKey(`vcpkg-pkg-a1b2c3d4-sdl3-${hash}`)).toBe(hash);
+  });
+
+  test('extracts hash from key with hyphenated port name', () => {
+    expect(
+      hashFromCacheKey(`vcpkg-pkg-a1b2c3d4-vcpkg-cmake-config-${hash}`),
+    ).toBe(hash);
+  });
+
+  test('returns null for malformed key', () => {
+    expect(hashFromCacheKey('vcpkg-pkg-tooshort')).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+describe('cacheKeyFor', () => {
+  const hash = 'f'.repeat(64);
+
+  test('prefix + hash only (no scope, no name)', () => {
+    expect(cacheKeyFor('vcpkg-pkg', '', '', hash)).toBe(`vcpkg-pkg-${hash}`);
+  });
+
+  test('prefix + scope + hash (no name)', () => {
+    expect(cacheKeyFor('vcpkg-pkg', 'a1b2c3d4', '', hash)).toBe(
+      `vcpkg-pkg-a1b2c3d4-${hash}`,
     );
+  });
+
+  test('prefix + scope + name + hash', () => {
+    expect(cacheKeyFor('vcpkg-pkg', 'a1b2c3d4', 'sdl3', hash)).toBe(
+      `vcpkg-pkg-a1b2c3d4-sdl3-${hash}`,
+    );
+  });
+
+  test('prefix + scope + hyphenated name + hash', () => {
+    expect(
+      cacheKeyFor('vcpkg-pkg', 'a1b2c3d4', 'vcpkg-cmake-config', hash),
+    ).toBe(`vcpkg-pkg-a1b2c3d4-vcpkg-cmake-config-${hash}`);
   });
 });
 
@@ -177,11 +220,18 @@ describe('getVcpkgCommit', () => {
 
   test('reads HEAD from a git repo', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gitrepo-'));
+    const env = {
+      ...process.env,
+      GIT_AUTHOR_NAME: 'test',
+      GIT_AUTHOR_EMAIL: 'test@test',
+      GIT_COMMITTER_NAME: 'test',
+      GIT_COMMITTER_EMAIL: 'test@test',
+    };
     execSync('git init', { cwd: dir, stdio: 'pipe' });
     execSync('git commit --allow-empty -m "init"', {
       cwd: dir,
       stdio: 'pipe',
-      env: { ...process.env, GIT_AUTHOR_NAME: 'test', GIT_AUTHOR_EMAIL: 'test@test', GIT_COMMITTER_NAME: 'test', GIT_COMMITTER_EMAIL: 'test@test' },
+      env,
     });
     const commit = getVcpkgCommit(dir);
     expect(commit).toMatch(/^[0-9a-f]{40}$/);
@@ -191,20 +241,28 @@ describe('getVcpkgCommit', () => {
 
 // ---------------------------------------------------------------------------
 describe('computeScope', () => {
+  const gitEnv = {
+    ...process.env,
+    GIT_AUTHOR_NAME: 'test',
+    GIT_AUTHOR_EMAIL: 'test@test',
+    GIT_COMMITTER_NAME: 'test',
+    GIT_COMMITTER_EMAIL: 'test@test',
+  };
+
   test('returns empty string when no inputs', () => {
     expect(computeScope(null, null)).toBe('');
   });
 
-  test('returns 16-char hex when given a git repo', () => {
+  test('returns 8-char hex when given a git repo', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'scope-git-'));
     execSync('git init', { cwd: dir, stdio: 'pipe' });
     execSync('git commit --allow-empty -m "init"', {
       cwd: dir,
       stdio: 'pipe',
-      env: { ...process.env, GIT_AUTHOR_NAME: 'test', GIT_AUTHOR_EMAIL: 'test@test', GIT_COMMITTER_NAME: 'test', GIT_COMMITTER_EMAIL: 'test@test' },
+      env: gitEnv,
     });
     const scope = computeScope(dir, null);
-    expect(scope).toMatch(/^[0-9a-f]{16}$/);
+    expect(scope).toMatch(/^[0-9a-f]{8}$/);
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
@@ -215,21 +273,110 @@ describe('computeScope', () => {
     const s1 = computeScope(null, dir);
     fs.writeFileSync(path.join(dir, 'my-port', 'portfile.cmake'), 'v2');
     const s2 = computeScope(null, dir);
-    expect(s1).toMatch(/^[0-9a-f]{16}$/);
-    expect(s2).toMatch(/^[0-9a-f]{16}$/);
+    expect(s1).toMatch(/^[0-9a-f]{8}$/);
+    expect(s2).toMatch(/^[0-9a-f]{8}$/);
     expect(s1).not.toBe(s2);
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
   test('changes when vcpkg commit changes', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'scope-commit-'));
-    const gitEnv = { ...process.env, GIT_AUTHOR_NAME: 'test', GIT_AUTHOR_EMAIL: 'test@test', GIT_COMMITTER_NAME: 'test', GIT_COMMITTER_EMAIL: 'test@test' };
     execSync('git init', { cwd: dir, stdio: 'pipe' });
-    execSync('git commit --allow-empty -m "first"', { cwd: dir, stdio: 'pipe', env: gitEnv });
+    execSync('git commit --allow-empty -m "first"', {
+      cwd: dir,
+      stdio: 'pipe',
+      env: gitEnv,
+    });
     const s1 = computeScope(dir, null);
-    execSync('git commit --allow-empty -m "second"', { cwd: dir, stdio: 'pipe', env: gitEnv });
+    execSync('git commit --allow-empty -m "second"', {
+      cwd: dir,
+      stdio: 'pipe',
+      env: gitEnv,
+    });
     const s2 = computeScope(dir, null);
     expect(s1).not.toBe(s2);
     fs.rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+// ---------------------------------------------------------------------------
+describe('parseVcpkgStatus', () => {
+  let tmpDir;
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'status-test-'));
+    fs.mkdirSync(path.join(tmpDir, 'vcpkg'), { recursive: true });
+  });
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  test('returns empty map when status file does not exist', () => {
+    expect(parseVcpkgStatus(tmpDir).size).toBe(0);
+  });
+
+  test('parses package entries with Abi field', () => {
+    const hash1 = 'a'.repeat(64);
+    const hash2 = 'b'.repeat(64);
+    fs.writeFileSync(
+      path.join(tmpDir, 'vcpkg', 'status'),
+      [
+        `Package: sdl3`,
+        `Version: 3.2.0`,
+        `Architecture: x64-linux`,
+        `Multi-Arch: same`,
+        `Abi: ${hash1}`,
+        `Type: Port`,
+        `Status: install ok installed`,
+        ``,
+        `Package: vcpkg-cmake`,
+        `Version: 2024-04-18`,
+        `Architecture: x64-linux`,
+        `Multi-Arch: same`,
+        `Abi: ${hash2}`,
+        `Type: Port`,
+        `Status: install ok installed`,
+      ].join('\n'),
+    );
+
+    const map = parseVcpkgStatus(tmpDir);
+    expect(map.size).toBe(2);
+    expect(map.get(hash1)).toBe('sdl3');
+    expect(map.get(hash2)).toBe('vcpkg-cmake');
+  });
+
+  test('skips feature entries (no Abi field)', () => {
+    const hash = 'c'.repeat(64);
+    fs.writeFileSync(
+      path.join(tmpDir, 'vcpkg', 'status'),
+      [
+        `Package: sdl3`,
+        `Version: 3.2.0`,
+        `Abi: ${hash}`,
+        `Status: install ok installed`,
+        ``,
+        `Package: sdl3`,
+        `Feature: vulkan`,
+        `Architecture: x64-linux`,
+        `Status: install ok installed`,
+      ].join('\n'),
+    );
+
+    const map = parseVcpkgStatus(tmpDir);
+    expect(map.size).toBe(1);
+    expect(map.get(hash)).toBe('sdl3');
+  });
+
+  test('skips entries that are not installed', () => {
+    const hash = 'd'.repeat(64);
+    fs.writeFileSync(
+      path.join(tmpDir, 'vcpkg', 'status'),
+      [
+        `Package: old-pkg`,
+        `Abi: ${hash}`,
+        `Status: purge ok not-installed`,
+      ].join('\n'),
+    );
+
+    expect(parseVcpkgStatus(tmpDir).size).toBe(0);
   });
 });

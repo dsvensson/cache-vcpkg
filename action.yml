@@ -18,6 +18,9 @@ inputs:
   overlay-ports:
     description: 'Path to overlay ports directory. Cache is scoped to a content hash — changing any overlay file invalidates all entries.'
     required: false
+  installed-dir:
+    description: 'Path to vcpkg_installed directory. Used to resolve port names for cache keys. Auto-detected from $GITHUB_WORKSPACE/vcpkg_installed if not set.'
+    required: false
 
 outputs:
   archives-dir:

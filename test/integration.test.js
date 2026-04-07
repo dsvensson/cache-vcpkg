@@ -6,8 +6,10 @@ const crypto = require('crypto');
 const {
   snapshotArchives,
   hashFromRelPath,
+  hashFromCacheKey,
   cacheKeyFor,
   computeScope,
+  parseVcpkgStatus,
 } = require('../src/common');
 
 // ---------------------------------------------------------------------------
@@ -20,10 +22,6 @@ const VCPKG_BIN = path.join(VCPKG_ROOT, IS_WIN ? 'vcpkg.exe' : 'vcpkg');
 
 /**
  * Parse `vcpkg install --dry-run` output into unique lowercase port names.
- *
- * Lines look like:
- *   "  * sdl3[core]:x64-linux -> 3.2.0"
- *   "    vcpkg-cmake:x64-linux -> 2024-04-18"
  */
 function parseInstallPlan(output) {
   const pkgs = [];
@@ -60,7 +58,6 @@ describe('sdl3 binary caching', () => {
   let packages;
   let scope;
 
-  // ---- create a throw-away manifest and run --dry-run ----
   beforeAll(() => {
     archivesDir = fs.mkdtempSync(path.join(os.tmpdir(), 'vcpkg-archives-'));
     manifestDir = fs.mkdtempSync(path.join(os.tmpdir(), 'vcpkg-manifest-'));
@@ -91,7 +88,6 @@ describe('sdl3 binary caching', () => {
       console.error('vcpkg --dry-run output:\n', output);
     }
 
-    // Compute scope the same way the action would
     scope = computeScope(VCPKG_ROOT, null);
   }, 120_000);
 
@@ -100,26 +96,28 @@ describe('sdl3 binary caching', () => {
     fs.rmSync(manifestDir, { recursive: true, force: true });
   });
 
-  // ---- tests ----
-
   test('install plan includes sdl3 and at least one dependency', () => {
     expect(packages).toContain('sdl3');
     expect(packages.length).toBeGreaterThan(1);
   });
 
-  test('scope is derived from the vcpkg commit', () => {
-    expect(scope).toMatch(/^[0-9a-f]{16}$/);
+  test('scope is an 8-char hex string derived from vcpkg commit', () => {
+    expect(scope).toMatch(/^[0-9a-f]{8}$/);
   });
 
-  test('action save step would cache every built package with scoped keys', async () => {
-    // 1. Pre-build snapshot is empty (fresh archives dir)
+  test('save step produces named, scoped cache keys for every package', async () => {
     const preSnapshot = snapshotArchives(archivesDir);
     expect(preSnapshot.size).toBe(0);
 
-    // 2. Simulate vcpkg writing one archive per package
+    // Simulate vcpkg writing archives and a status database
+    const installedDir = fs.mkdtempSync(path.join(os.tmpdir(), 'installed-'));
+    fs.mkdirSync(path.join(installedDir, 'vcpkg'), { recursive: true });
+
     const expectedHashes = [];
-    for (const _pkg of packages) {
-      const hash = crypto.randomBytes(32).toString('hex'); // 64 hex chars
+    const statusLines = [];
+
+    for (const pkg of packages) {
+      const hash = crypto.randomBytes(32).toString('hex');
       const subdir = hash.slice(0, 2);
       fs.mkdirSync(path.join(archivesDir, subdir), { recursive: true });
       fs.writeFileSync(
@@ -127,49 +125,67 @@ describe('sdl3 binary caching', () => {
         Buffer.alloc(128),
       );
       expectedHashes.push(hash);
+      statusLines.push(
+        [
+          `Package: ${pkg}`,
+          `Version: 1.0.0`,
+          `Architecture: x64-linux`,
+          `Abi: ${hash}`,
+          `Status: install ok installed`,
+        ].join('\n'),
+      );
     }
 
-    // 3. Post-build snapshot finds every simulated archive
-    const postSnapshot = snapshotArchives(archivesDir);
-    expect(postSnapshot.size).toBe(packages.length);
+    fs.writeFileSync(
+      path.join(installedDir, 'vcpkg', 'status'),
+      statusLines.join('\n\n') + '\n',
+    );
 
-    // 4. Diff — everything is new
+    // Parse the status file
+    const abiToPort = parseVcpkgStatus(installedDir);
+    expect(abiToPort.size).toBe(packages.length);
+
+    // Post-build snapshot and diff
+    const postSnapshot = snapshotArchives(archivesDir);
     const newFiles = [...postSnapshot].filter(f => !preSnapshot.has(f));
     expect(newFiles).toHaveLength(packages.length);
 
-    // 5. Replay the same save loop that save.js uses and capture calls
+    // Replay save logic with mocked saveCache
     const mockSaveCache = jest.fn().mockResolvedValue(1);
 
     for (const relPath of newFiles) {
       const hash = hashFromRelPath(relPath);
-      const key = cacheKeyFor('vcpkg-pkg', scope, hash);
+      const portName = abiToPort.get(hash) || '';
+      const key = cacheKeyFor('vcpkg-pkg', scope, portName, hash);
       await mockSaveCache([path.join(archivesDir, relPath)], key);
     }
 
     expect(mockSaveCache).toHaveBeenCalledTimes(packages.length);
 
-    // 6. Every call has a scoped key and points at a real zip
+    // Verify key format and that hash can be extracted back
     const savedKeys = [];
-    const scopePattern = new RegExp(
-      `^vcpkg-pkg-${scope}-[0-9a-f]{64}$`,
-    );
     for (const [paths, key] of mockSaveCache.mock.calls) {
-      expect(key).toMatch(scopePattern);
-      expect(paths).toHaveLength(1);
       expect(paths[0]).toMatch(/\.zip$/);
       expect(fs.existsSync(paths[0])).toBe(true);
+
+      const extractedHash = hashFromCacheKey(key);
+      expect(extractedHash).toMatch(/^[0-9a-f]{64}$/);
+      expect(expectedHashes).toContain(extractedHash);
       savedKeys.push(key);
     }
 
-    // 7. Every simulated hash appears exactly once
-    for (const hash of expectedHashes) {
-      expect(savedKeys).toContain(cacheKeyFor('vcpkg-pkg', scope, hash));
+    // Every key contains both the scope and a port name
+    for (const pkg of packages) {
+      const hash = expectedHashes[packages.indexOf(pkg)];
+      const expected = `vcpkg-pkg-${scope}-${pkg}-${hash}`;
+      expect(savedKeys).toContain(expected);
     }
+
+    fs.rmSync(installedDir, { recursive: true, force: true });
   });
 
   test('already-cached packages are excluded from save', () => {
     const postSnapshot = snapshotArchives(archivesDir);
-    // Using the same set for pre and post yields zero new files
     const realDiff = [...postSnapshot].filter(f => !postSnapshot.has(f));
     expect(realDiff).toHaveLength(0);
   });
@@ -204,8 +220,8 @@ describe('overlay port invalidation', () => {
     );
     const scope2 = computeScope(VCPKG_ROOT, overlayDir);
 
-    expect(scope1).toMatch(/^[0-9a-f]{16}$/);
-    expect(scope2).toMatch(/^[0-9a-f]{16}$/);
+    expect(scope1).toMatch(/^[0-9a-f]{8}$/);
+    expect(scope2).toMatch(/^[0-9a-f]{8}$/);
     expect(scope1).not.toBe(scope2);
   });
 
@@ -218,8 +234,8 @@ describe('overlay port invalidation', () => {
     );
     const scope2 = computeScope(VCPKG_ROOT, overlayDir);
 
-    const key1 = cacheKeyFor('vcpkg-pkg', scope1, abiHash);
-    const key2 = cacheKeyFor('vcpkg-pkg', scope2, abiHash);
+    const key1 = cacheKeyFor('vcpkg-pkg', scope1, 'sdl3', abiHash);
+    const key2 = cacheKeyFor('vcpkg-pkg', scope2, 'sdl3', abiHash);
     expect(key1).not.toBe(key2);
   });
 

@@ -1,14 +1,27 @@
 const core = require('@actions/core');
 const cache = require('@actions/cache');
+const fs = require('fs');
 const path = require('path');
 const {
   getArchivesDir,
   snapshotArchives,
   hashFromRelPath,
   cacheKeyFor,
+  parseVcpkgStatus,
 } = require('./common');
 
 const CONCURRENCY = 10;
+
+function findInstalledDir() {
+  const input = core.getInput('installed-dir');
+  if (input && fs.existsSync(path.join(input, 'vcpkg', 'status'))) return input;
+
+  const workspace = process.env.GITHUB_WORKSPACE || process.cwd();
+  const candidate = path.join(workspace, 'vcpkg_installed');
+  if (fs.existsSync(path.join(candidate, 'vcpkg', 'status'))) return candidate;
+
+  return null;
+}
 
 async function run() {
   try {
@@ -32,6 +45,16 @@ async function run() {
       return;
     }
 
+    // ---- Resolve port names from vcpkg's status database ----
+    const installedDir = findInstalledDir();
+    const abiToPort = installedDir
+      ? parseVcpkgStatus(installedDir)
+      : new Map();
+
+    if (abiToPort.size > 0) {
+      core.info(`Resolved ${abiToPort.size} port names from status database`);
+    }
+
     let saved = 0;
     await core.group(
       `Saving ${newFiles.length} new packages to cache`,
@@ -41,14 +64,14 @@ async function run() {
           const results = await Promise.allSettled(
             batch.map(async relPath => {
               const hash = hashFromRelPath(relPath);
-              const key = cacheKeyFor(prefix, scope, hash);
+              const portName = abiToPort.get(hash) || '';
+              const key = cacheKeyFor(prefix, scope, portName, hash);
               const zipPath = path.join(archivesDir, relPath);
 
               try {
                 await cache.saveCache([zipPath], key);
                 saved++;
               } catch (e) {
-                // "already exists" is benign — another job may have saved it first
                 if (e.message && e.message.includes('already exists')) {
                   core.debug(`Already cached: ${hash}`);
                 } else {

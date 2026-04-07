@@ -5,6 +5,7 @@ const path = require('path');
 const {
   getArchivesDir,
   snapshotArchives,
+  hashFromCacheKey,
   computeScope,
 } = require('./common');
 
@@ -70,11 +71,12 @@ async function run() {
     // ---- List known cache entries via GitHub REST API ----
     const allKeys = await listCacheKeys(`${keyPrefix}-`, token);
 
-    // Deduplicate: extract ABI hash from key, keep first occurrence
+    // Deduplicate: extract ABI hash from key (last 64 hex chars),
+    // works for both named and unnamed key formats.
     const seen = new Set();
     const tasks = [];
     for (const key of allKeys) {
-      const hash = key.slice(keyPrefix.length + 1);
+      const hash = hashFromCacheKey(key);
       if (!hash || seen.has(hash)) continue;
       seen.add(hash);
       tasks.push({ key, hash });

@@ -38,14 +38,26 @@ function hashFromRelPath(relPath) {
   return path.basename(relPath, '.zip');
 }
 
-function cacheKeyFor(prefix, scope, hash) {
-  const base = scope ? `${prefix}-${scope}` : prefix;
+/**
+ * Extract the 64-char ABI hash from the tail of a cache key.
+ * Works for both named ("…-sdl3-<hash>") and unnamed ("…-<hash>") formats.
+ */
+function hashFromCacheKey(key) {
+  const m = key.match(/([0-9a-f]{64})$/);
+  return m ? m[1] : null;
+}
+
+/**
+ * Build a cache key.  portName is optional — omit or pass '' to skip it.
+ */
+function cacheKeyFor(prefix, scope, portName, hash) {
+  let base = scope ? `${prefix}-${scope}` : prefix;
+  if (portName) base += `-${portName}`;
   return `${base}-${hash}`;
 }
 
 // ---------------------------------------------------------------------------
-// Scope computation — scopes cache keys by vcpkg version + overlay contents
-// so restore only fetches entries that match the current configuration.
+// Scope computation
 // ---------------------------------------------------------------------------
 
 function getVcpkgCommit(vcpkgRoot) {
@@ -86,8 +98,8 @@ function hashDirectory(dir) {
 }
 
 /**
- * Build a 16-char hex scope string from the vcpkg commit and/or the overlay
- * ports directory contents.  Returns '' when neither input is provided.
+ * Build an 8-char hex scope from the vcpkg commit and/or overlay contents.
+ * Returns '' when neither input is provided.
  */
 function computeScope(vcpkgRoot, overlayPorts) {
   const parts = [];
@@ -108,15 +120,50 @@ function computeScope(vcpkgRoot, overlayPorts) {
     .createHash('sha256')
     .update(parts.join('\n'))
     .digest('hex')
-    .slice(0, 16);
+    .slice(0, 8);
+}
+
+// ---------------------------------------------------------------------------
+// Port-name resolution from vcpkg's installed status database
+// ---------------------------------------------------------------------------
+
+/**
+ * Parse vcpkg's DPKG-style status file and return a Map<abiHash, portName>.
+ * @param {string} installedDir  Path to vcpkg_installed (contains vcpkg/status)
+ */
+function parseVcpkgStatus(installedDir) {
+  const abiToPort = new Map();
+  const statusPath = path.join(installedDir, 'vcpkg', 'status');
+
+  if (!fs.existsSync(statusPath)) return abiToPort;
+
+  const content = fs.readFileSync(statusPath, 'utf-8');
+  for (const para of content.split(/\n\n+/)) {
+    let pkg = null;
+    let abi = null;
+    let installed = false;
+
+    for (const line of para.split('\n')) {
+      if (line.startsWith('Package: ')) pkg = line.slice(9).trim();
+      else if (line.startsWith('Abi: ')) abi = line.slice(5).trim();
+      else if (line === 'Status: install ok installed')
+        installed = true;
+    }
+
+    if (pkg && abi && installed) abiToPort.set(abi, pkg);
+  }
+
+  return abiToPort;
 }
 
 module.exports = {
   getArchivesDir,
   snapshotArchives,
   hashFromRelPath,
+  hashFromCacheKey,
   cacheKeyFor,
   getVcpkgCommit,
   hashDirectory,
   computeScope,
+  parseVcpkgStatus,
 };
