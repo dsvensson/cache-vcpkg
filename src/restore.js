@@ -59,21 +59,16 @@ async function run() {
     const scope = computeScope(vcpkgRoot || null, overlayPorts || null);
     const keyPrefix = scope ? `${prefix}-${scope}` : prefix;
 
-    if (scope) core.info(`Cache scope: ${scope}`);
     if (vcpkgRoot && !scope) {
       core.warning(
         `vcpkg-root was set but no git commit could be read from: ${vcpkgRoot}`,
       );
     }
 
-    core.info(`Archives dir: ${archivesDir}`);
     fs.mkdirSync(archivesDir, { recursive: true });
 
     // ---- List known cache entries via GitHub REST API ----
     const allKeys = await listCacheKeys(`${keyPrefix}-`, token);
-    core.info(
-      `Found ${allKeys.length} cache entries with prefix "${keyPrefix}"`,
-    );
 
     // Deduplicate: extract ABI hash from key, keep first occurrence
     const seen = new Set();
@@ -87,28 +82,33 @@ async function run() {
 
     // ---- Restore each package in batches ----
     let restored = 0;
-    for (let i = 0; i < tasks.length; i += CONCURRENCY) {
-      const batch = tasks.slice(i, i + CONCURRENCY);
-      const results = await Promise.allSettled(
-        batch.map(async ({ key, hash }) => {
-          const subdir = hash.slice(0, 2);
-          const zipPath = path.join(archivesDir, subdir, `${hash}.zip`);
-          fs.mkdirSync(path.join(archivesDir, subdir), { recursive: true });
+    await core.group(
+      `Restoring ${tasks.length} cached packages (scope: ${scope || 'none'})`,
+      async () => {
+        for (let i = 0; i < tasks.length; i += CONCURRENCY) {
+          const batch = tasks.slice(i, i + CONCURRENCY);
+          const results = await Promise.allSettled(
+            batch.map(async ({ key, hash }) => {
+              const subdir = hash.slice(0, 2);
+              const zipPath = path.join(archivesDir, subdir, `${hash}.zip`);
+              fs.mkdirSync(path.join(archivesDir, subdir), { recursive: true });
 
-          const hit = await cache.restoreCache([zipPath], key);
-          if (hit) {
-            restored++;
-            return true;
+              const hit = await cache.restoreCache([zipPath], key);
+              if (hit) {
+                restored++;
+                return true;
+              }
+              return false;
+            }),
+          );
+          for (const r of results) {
+            if (r.status === 'rejected') {
+              core.warning(`Restore failed: ${r.reason?.message || r.reason}`);
+            }
           }
-          return false;
-        }),
-      );
-      for (const r of results) {
-        if (r.status === 'rejected') {
-          core.warning(`Restore failed: ${r.reason?.message || r.reason}`);
         }
-      }
-    }
+      },
+    );
     core.info(`Restored ${restored} / ${tasks.length} packages`);
 
     // ---- Snapshot current state so post step can diff ----

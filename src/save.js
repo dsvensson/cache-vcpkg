@@ -27,39 +27,45 @@ async function run() {
       f => !oldSnapshot.has(f),
     );
 
-    core.info(`New packages to cache: ${newFiles.length}`);
-    if (newFiles.length === 0) return;
+    if (newFiles.length === 0) {
+      core.info('No new packages to cache');
+      return;
+    }
 
     let saved = 0;
-    for (let i = 0; i < newFiles.length; i += CONCURRENCY) {
-      const batch = newFiles.slice(i, i + CONCURRENCY);
-      const results = await Promise.allSettled(
-        batch.map(async relPath => {
-          const hash = hashFromRelPath(relPath);
-          const key = cacheKeyFor(prefix, scope, hash);
-          const zipPath = path.join(archivesDir, relPath);
+    await core.group(
+      `Saving ${newFiles.length} new packages to cache`,
+      async () => {
+        for (let i = 0; i < newFiles.length; i += CONCURRENCY) {
+          const batch = newFiles.slice(i, i + CONCURRENCY);
+          const results = await Promise.allSettled(
+            batch.map(async relPath => {
+              const hash = hashFromRelPath(relPath);
+              const key = cacheKeyFor(prefix, scope, hash);
+              const zipPath = path.join(archivesDir, relPath);
 
-          try {
-            await cache.saveCache([zipPath], key);
-            saved++;
-            core.info(`Cached ${hash}`);
-          } catch (e) {
-            // "already exists" is benign — another job may have saved it first
-            if (e.message && e.message.includes('already exists')) {
-              core.info(`Already cached: ${hash}`);
-            } else {
-              throw e;
+              try {
+                await cache.saveCache([zipPath], key);
+                saved++;
+              } catch (e) {
+                // "already exists" is benign — another job may have saved it first
+                if (e.message && e.message.includes('already exists')) {
+                  core.debug(`Already cached: ${hash}`);
+                } else {
+                  throw e;
+                }
+              }
+            }),
+          );
+
+          for (const r of results) {
+            if (r.status === 'rejected') {
+              core.warning(`Save failed: ${r.reason?.message || r.reason}`);
             }
           }
-        }),
-      );
-
-      for (const r of results) {
-        if (r.status === 'rejected') {
-          core.warning(`Save failed: ${r.reason?.message || r.reason}`);
         }
-      }
-    }
+      },
+    );
     core.info(`Saved ${saved} new packages to cache`);
   } catch (err) {
     core.warning(`vcpkg cache save failed: ${err.message}`);
