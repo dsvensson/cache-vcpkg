@@ -40430,14 +40430,26 @@ function hashFromRelPath(relPath) {
   return path.basename(relPath, '.zip');
 }
 
-function cacheKeyFor(prefix, scope, hash) {
-  const base = scope ? `${prefix}-${scope}` : prefix;
+/**
+ * Extract the 64-char ABI hash from the tail of a cache key.
+ * Works for both named ("…-sdl3-<hash>") and unnamed ("…-<hash>") formats.
+ */
+function hashFromCacheKey(key) {
+  const m = key.match(/([0-9a-f]{64})$/);
+  return m ? m[1] : null;
+}
+
+/**
+ * Build a cache key.  portName is optional — omit or pass '' to skip it.
+ */
+function cacheKeyFor(prefix, scope, portName, hash) {
+  let base = scope ? `${prefix}-${scope}` : prefix;
+  if (portName) base += `-${portName}`;
   return `${base}-${hash}`;
 }
 
 // ---------------------------------------------------------------------------
-// Scope computation — scopes cache keys by vcpkg version + overlay contents
-// so restore only fetches entries that match the current configuration.
+// Scope computation
 // ---------------------------------------------------------------------------
 
 function getVcpkgCommit(vcpkgRoot) {
@@ -40478,8 +40490,8 @@ function hashDirectory(dir) {
 }
 
 /**
- * Build a 16-char hex scope string from the vcpkg commit and/or the overlay
- * ports directory contents.  Returns '' when neither input is provided.
+ * Build an 8-char hex scope from the vcpkg commit and/or overlay contents.
+ * Returns '' when neither input is provided.
  */
 function computeScope(vcpkgRoot, overlayPorts) {
   const parts = [];
@@ -40500,17 +40512,52 @@ function computeScope(vcpkgRoot, overlayPorts) {
     .createHash('sha256')
     .update(parts.join('\n'))
     .digest('hex')
-    .slice(0, 16);
+    .slice(0, 8);
+}
+
+// ---------------------------------------------------------------------------
+// Port-name resolution from vcpkg's installed status database
+// ---------------------------------------------------------------------------
+
+/**
+ * Parse vcpkg's DPKG-style status file and return a Map<abiHash, portName>.
+ * @param {string} installedDir  Path to vcpkg_installed (contains vcpkg/status)
+ */
+function parseVcpkgStatus(installedDir) {
+  const abiToPort = new Map();
+  const statusPath = path.join(installedDir, 'vcpkg', 'status');
+
+  if (!fs.existsSync(statusPath)) return abiToPort;
+
+  const content = fs.readFileSync(statusPath, 'utf-8');
+  for (const para of content.split(/\n\n+/)) {
+    let pkg = null;
+    let abi = null;
+    let installed = false;
+
+    for (const line of para.split('\n')) {
+      if (line.startsWith('Package: ')) pkg = line.slice(9).trim();
+      else if (line.startsWith('Abi: ')) abi = line.slice(5).trim();
+      else if (line === 'Status: install ok installed')
+        installed = true;
+    }
+
+    if (pkg && abi && installed) abiToPort.set(abi, pkg);
+  }
+
+  return abiToPort;
 }
 
 module.exports = {
   getArchivesDir,
   snapshotArchives,
   hashFromRelPath,
+  hashFromCacheKey,
   cacheKeyFor,
   getVcpkgCommit,
   hashDirectory,
   computeScope,
+  parseVcpkgStatus,
 };
 
 
@@ -83146,15 +83193,28 @@ module.exports = /*#__PURE__*/JSON.parse('{"name":"@actions/cache","version":"4.
 var __webpack_exports__ = {};
 const core = __nccwpck_require__(7484);
 const cache = __nccwpck_require__(5116);
+const fs = __nccwpck_require__(9896);
 const path = __nccwpck_require__(6928);
 const {
   getArchivesDir,
   snapshotArchives,
   hashFromRelPath,
   cacheKeyFor,
+  parseVcpkgStatus,
 } = __nccwpck_require__(5128);
 
 const CONCURRENCY = 10;
+
+function findInstalledDir() {
+  const input = core.getInput('installed-dir');
+  if (input && fs.existsSync(path.join(input, 'vcpkg', 'status'))) return input;
+
+  const workspace = process.env.GITHUB_WORKSPACE || process.cwd();
+  const candidate = path.join(workspace, 'vcpkg_installed');
+  if (fs.existsSync(path.join(candidate, 'vcpkg', 'status'))) return candidate;
+
+  return null;
+}
 
 async function run() {
   try {
@@ -83173,39 +83233,55 @@ async function run() {
       f => !oldSnapshot.has(f),
     );
 
-    core.info(`New packages to cache: ${newFiles.length}`);
-    if (newFiles.length === 0) return;
+    if (newFiles.length === 0) {
+      core.info('No new packages to cache');
+      return;
+    }
+
+    // ---- Resolve port names from vcpkg's status database ----
+    const installedDir = findInstalledDir();
+    const abiToPort = installedDir
+      ? parseVcpkgStatus(installedDir)
+      : new Map();
+
+    if (abiToPort.size > 0) {
+      core.info(`Resolved ${abiToPort.size} port names from status database`);
+    }
 
     let saved = 0;
-    for (let i = 0; i < newFiles.length; i += CONCURRENCY) {
-      const batch = newFiles.slice(i, i + CONCURRENCY);
-      const results = await Promise.allSettled(
-        batch.map(async relPath => {
-          const hash = hashFromRelPath(relPath);
-          const key = cacheKeyFor(prefix, scope, hash);
-          const zipPath = path.join(archivesDir, relPath);
+    await core.group(
+      `Saving ${newFiles.length} new packages to cache`,
+      async () => {
+        for (let i = 0; i < newFiles.length; i += CONCURRENCY) {
+          const batch = newFiles.slice(i, i + CONCURRENCY);
+          const results = await Promise.allSettled(
+            batch.map(async relPath => {
+              const hash = hashFromRelPath(relPath);
+              const portName = abiToPort.get(hash) || '';
+              const key = cacheKeyFor(prefix, scope, portName, hash);
+              const zipPath = path.join(archivesDir, relPath);
 
-          try {
-            await cache.saveCache([zipPath], key);
-            saved++;
-            core.info(`Cached ${hash}`);
-          } catch (e) {
-            // "already exists" is benign — another job may have saved it first
-            if (e.message && e.message.includes('already exists')) {
-              core.info(`Already cached: ${hash}`);
-            } else {
-              throw e;
+              try {
+                await cache.saveCache([zipPath], key);
+                saved++;
+              } catch (e) {
+                if (e.message && e.message.includes('already exists')) {
+                  core.debug(`Already cached: ${hash}`);
+                } else {
+                  throw e;
+                }
+              }
+            }),
+          );
+
+          for (const r of results) {
+            if (r.status === 'rejected') {
+              core.warning(`Save failed: ${r.reason?.message || r.reason}`);
             }
           }
-        }),
-      );
-
-      for (const r of results) {
-        if (r.status === 'rejected') {
-          core.warning(`Save failed: ${r.reason?.message || r.reason}`);
         }
-      }
-    }
+      },
+    );
     core.info(`Saved ${saved} new packages to cache`);
   } catch (err) {
     core.warning(`vcpkg cache save failed: ${err.message}`);

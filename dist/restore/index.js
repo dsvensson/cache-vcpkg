@@ -40430,14 +40430,26 @@ function hashFromRelPath(relPath) {
   return path.basename(relPath, '.zip');
 }
 
-function cacheKeyFor(prefix, scope, hash) {
-  const base = scope ? `${prefix}-${scope}` : prefix;
+/**
+ * Extract the 64-char ABI hash from the tail of a cache key.
+ * Works for both named ("…-sdl3-<hash>") and unnamed ("…-<hash>") formats.
+ */
+function hashFromCacheKey(key) {
+  const m = key.match(/([0-9a-f]{64})$/);
+  return m ? m[1] : null;
+}
+
+/**
+ * Build a cache key.  portName is optional — omit or pass '' to skip it.
+ */
+function cacheKeyFor(prefix, scope, portName, hash) {
+  let base = scope ? `${prefix}-${scope}` : prefix;
+  if (portName) base += `-${portName}`;
   return `${base}-${hash}`;
 }
 
 // ---------------------------------------------------------------------------
-// Scope computation — scopes cache keys by vcpkg version + overlay contents
-// so restore only fetches entries that match the current configuration.
+// Scope computation
 // ---------------------------------------------------------------------------
 
 function getVcpkgCommit(vcpkgRoot) {
@@ -40478,8 +40490,8 @@ function hashDirectory(dir) {
 }
 
 /**
- * Build a 16-char hex scope string from the vcpkg commit and/or the overlay
- * ports directory contents.  Returns '' when neither input is provided.
+ * Build an 8-char hex scope from the vcpkg commit and/or overlay contents.
+ * Returns '' when neither input is provided.
  */
 function computeScope(vcpkgRoot, overlayPorts) {
   const parts = [];
@@ -40500,17 +40512,52 @@ function computeScope(vcpkgRoot, overlayPorts) {
     .createHash('sha256')
     .update(parts.join('\n'))
     .digest('hex')
-    .slice(0, 16);
+    .slice(0, 8);
+}
+
+// ---------------------------------------------------------------------------
+// Port-name resolution from vcpkg's installed status database
+// ---------------------------------------------------------------------------
+
+/**
+ * Parse vcpkg's DPKG-style status file and return a Map<abiHash, portName>.
+ * @param {string} installedDir  Path to vcpkg_installed (contains vcpkg/status)
+ */
+function parseVcpkgStatus(installedDir) {
+  const abiToPort = new Map();
+  const statusPath = path.join(installedDir, 'vcpkg', 'status');
+
+  if (!fs.existsSync(statusPath)) return abiToPort;
+
+  const content = fs.readFileSync(statusPath, 'utf-8');
+  for (const para of content.split(/\n\n+/)) {
+    let pkg = null;
+    let abi = null;
+    let installed = false;
+
+    for (const line of para.split('\n')) {
+      if (line.startsWith('Package: ')) pkg = line.slice(9).trim();
+      else if (line.startsWith('Abi: ')) abi = line.slice(5).trim();
+      else if (line === 'Status: install ok installed')
+        installed = true;
+    }
+
+    if (pkg && abi && installed) abiToPort.set(abi, pkg);
+  }
+
+  return abiToPort;
 }
 
 module.exports = {
   getArchivesDir,
   snapshotArchives,
   hashFromRelPath,
+  hashFromCacheKey,
   cacheKeyFor,
   getVcpkgCommit,
   hashDirectory,
   computeScope,
+  parseVcpkgStatus,
 };
 
 
@@ -83151,6 +83198,7 @@ const path = __nccwpck_require__(6928);
 const {
   getArchivesDir,
   snapshotArchives,
+  hashFromCacheKey,
   computeScope,
 } = __nccwpck_require__(5128);
 
@@ -83205,27 +83253,23 @@ async function run() {
     const scope = computeScope(vcpkgRoot || null, overlayPorts || null);
     const keyPrefix = scope ? `${prefix}-${scope}` : prefix;
 
-    if (scope) core.info(`Cache scope: ${scope}`);
     if (vcpkgRoot && !scope) {
       core.warning(
         `vcpkg-root was set but no git commit could be read from: ${vcpkgRoot}`,
       );
     }
 
-    core.info(`Archives dir: ${archivesDir}`);
     fs.mkdirSync(archivesDir, { recursive: true });
 
     // ---- List known cache entries via GitHub REST API ----
     const allKeys = await listCacheKeys(`${keyPrefix}-`, token);
-    core.info(
-      `Found ${allKeys.length} cache entries with prefix "${keyPrefix}"`,
-    );
 
-    // Deduplicate: extract ABI hash from key, keep first occurrence
+    // Deduplicate: extract ABI hash from key (last 64 hex chars),
+    // works for both named and unnamed key formats.
     const seen = new Set();
     const tasks = [];
     for (const key of allKeys) {
-      const hash = key.slice(keyPrefix.length + 1);
+      const hash = hashFromCacheKey(key);
       if (!hash || seen.has(hash)) continue;
       seen.add(hash);
       tasks.push({ key, hash });
@@ -83233,28 +83277,33 @@ async function run() {
 
     // ---- Restore each package in batches ----
     let restored = 0;
-    for (let i = 0; i < tasks.length; i += CONCURRENCY) {
-      const batch = tasks.slice(i, i + CONCURRENCY);
-      const results = await Promise.allSettled(
-        batch.map(async ({ key, hash }) => {
-          const subdir = hash.slice(0, 2);
-          const zipPath = path.join(archivesDir, subdir, `${hash}.zip`);
-          fs.mkdirSync(path.join(archivesDir, subdir), { recursive: true });
+    await core.group(
+      `Restoring ${tasks.length} cached packages (scope: ${scope || 'none'})`,
+      async () => {
+        for (let i = 0; i < tasks.length; i += CONCURRENCY) {
+          const batch = tasks.slice(i, i + CONCURRENCY);
+          const results = await Promise.allSettled(
+            batch.map(async ({ key, hash }) => {
+              const subdir = hash.slice(0, 2);
+              const zipPath = path.join(archivesDir, subdir, `${hash}.zip`);
+              fs.mkdirSync(path.join(archivesDir, subdir), { recursive: true });
 
-          const hit = await cache.restoreCache([zipPath], key);
-          if (hit) {
-            restored++;
-            return true;
+              const hit = await cache.restoreCache([zipPath], key);
+              if (hit) {
+                restored++;
+                return true;
+              }
+              return false;
+            }),
+          );
+          for (const r of results) {
+            if (r.status === 'rejected') {
+              core.warning(`Restore failed: ${r.reason?.message || r.reason}`);
+            }
           }
-          return false;
-        }),
-      );
-      for (const r of results) {
-        if (r.status === 'rejected') {
-          core.warning(`Restore failed: ${r.reason?.message || r.reason}`);
         }
-      }
-    }
+      },
+    );
     core.info(`Restored ${restored} / ${tasks.length} packages`);
 
     // ---- Snapshot current state so post step can diff ----
