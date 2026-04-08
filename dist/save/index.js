@@ -83218,6 +83218,11 @@ function findInstalledDir() {
 
 async function run() {
   try {
+    if (core.getState('save-cache') === 'false') {
+      core.info('Cache saving is disabled (save-cache: false)');
+      return;
+    }
+
     const prefix =
       core.getState('prefix') ||
       core.getInput('cache-key-prefix') ||

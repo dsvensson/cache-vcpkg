@@ -83247,6 +83247,7 @@ async function run() {
     const prefix = core.getInput('cache-key-prefix') || 'vcpkg-pkg';
     const vcpkgRoot = core.getInput('vcpkg-root') || '';
     const overlayPorts = core.getInput('overlay-ports') || '';
+    const saveCache = core.getInput('save-cache') !== 'false';
     const archivesDir = getArchivesDir();
 
     // ---- Compute scope from vcpkg commit + overlay ports ----
@@ -83307,17 +83308,21 @@ async function run() {
     core.info(`Restored ${restored} / ${tasks.length} packages`);
 
     // ---- Snapshot current state so post step can diff ----
-    const snapshot = Array.from(snapshotArchives(archivesDir));
-    core.saveState('snapshot', JSON.stringify(snapshot));
+    if (saveCache) {
+      const snapshot = Array.from(snapshotArchives(archivesDir));
+      core.saveState('snapshot', JSON.stringify(snapshot));
+    }
+    core.saveState('save-cache', saveCache ? 'true' : 'false');
     core.saveState('archives-dir', archivesDir);
     core.saveState('scope', scope);
     core.saveState('prefix', prefix);
 
     // ---- Expose the path for vcpkg configuration ----
+    const mode = saveCache ? 'readwrite' : 'read';
     core.setOutput('archives-dir', archivesDir);
     core.exportVariable(
       'VCPKG_BINARY_SOURCES',
-      `files,${archivesDir},readwrite`,
+      `files,${archivesDir},${mode}`,
     );
   } catch (err) {
     // Never fail the build for cache issues
