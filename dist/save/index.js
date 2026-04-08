@@ -40490,10 +40490,11 @@ function hashDirectory(dir) {
 }
 
 /**
- * Build an 8-char hex scope from the vcpkg commit and/or overlay contents.
- * Returns '' when neither input is provided.
+ * Build an 8-char hex scope from the vcpkg commit, overlay contents, and
+ * an optional user-supplied key string.
+ * Returns '' when no inputs are provided.
  */
-function computeScope(vcpkgRoot, overlayPorts) {
+function computeScope(vcpkgRoot, overlayPorts, extraKey) {
   const parts = [];
 
   if (vcpkgRoot) {
@@ -40506,6 +40507,8 @@ function computeScope(vcpkgRoot, overlayPorts) {
     parts.push(`overlay:${dirHash}`);
   }
 
+  if (extraKey) parts.push(`key:${extraKey}`);
+
   if (parts.length === 0) return '';
 
   return crypto
@@ -40513,6 +40516,27 @@ function computeScope(vcpkgRoot, overlayPorts) {
     .update(parts.join('\n'))
     .digest('hex')
     .slice(0, 8);
+}
+
+// ---------------------------------------------------------------------------
+// Manifest — records the set of ABI hashes from the last successful build.
+// Used to determine cache-hit without restoring every package.
+// ---------------------------------------------------------------------------
+
+const MANIFEST_DIR = path.join(os.tmpdir(), 'vcpkg-cache-meta');
+
+function manifestPath() {
+  return path.join(MANIFEST_DIR, 'manifest.json');
+}
+
+function manifestKey(prefix, scope) {
+  const runId = process.env.GITHUB_RUN_ID || 'local';
+  const attempt = process.env.GITHUB_RUN_ATTEMPT || '1';
+  return `${prefix}-manifest-${scope}-${runId}-${attempt}`;
+}
+
+function manifestRestoreKey(prefix, scope) {
+  return `${prefix}-manifest-${scope}-`;
 }
 
 // ---------------------------------------------------------------------------
@@ -40557,6 +40581,10 @@ module.exports = {
   getVcpkgCommit,
   hashDirectory,
   computeScope,
+  manifestPath,
+  manifestKey,
+  manifestRestoreKey,
+  MANIFEST_DIR,
   parseVcpkgStatus,
 };
 
@@ -83201,6 +83229,9 @@ const {
   hashFromRelPath,
   cacheKeyFor,
   parseVcpkgStatus,
+  manifestPath,
+  manifestKey,
+  MANIFEST_DIR,
 } = __nccwpck_require__(5128);
 
 const CONCURRENCY = 10;
@@ -83238,56 +83269,79 @@ async function run() {
       f => !oldSnapshot.has(f),
     );
 
-    if (newFiles.length === 0) {
-      core.info('No new packages to cache');
-      return;
-    }
+    // ---- Save new packages ----
+    if (newFiles.length > 0) {
+      const installedDir = findInstalledDir();
+      const abiToPort = installedDir
+        ? parseVcpkgStatus(installedDir)
+        : new Map();
 
-    // ---- Resolve port names from vcpkg's status database ----
-    const installedDir = findInstalledDir();
-    const abiToPort = installedDir
-      ? parseVcpkgStatus(installedDir)
-      : new Map();
+      if (abiToPort.size > 0) {
+        core.info(
+          `Resolved ${abiToPort.size} port names from status database`,
+        );
+      }
 
-    if (abiToPort.size > 0) {
-      core.info(`Resolved ${abiToPort.size} port names from status database`);
-    }
+      let saved = 0;
+      await core.group(
+        `Saving ${newFiles.length} new packages to cache`,
+        async () => {
+          for (let i = 0; i < newFiles.length; i += CONCURRENCY) {
+            const batch = newFiles.slice(i, i + CONCURRENCY);
+            const results = await Promise.allSettled(
+              batch.map(async relPath => {
+                const hash = hashFromRelPath(relPath);
+                const portName = abiToPort.get(hash) || '';
+                const key = cacheKeyFor(prefix, scope, portName, hash);
+                const zipPath = path.join(archivesDir, relPath);
 
-    let saved = 0;
-    await core.group(
-      `Saving ${newFiles.length} new packages to cache`,
-      async () => {
-        for (let i = 0; i < newFiles.length; i += CONCURRENCY) {
-          const batch = newFiles.slice(i, i + CONCURRENCY);
-          const results = await Promise.allSettled(
-            batch.map(async relPath => {
-              const hash = hashFromRelPath(relPath);
-              const portName = abiToPort.get(hash) || '';
-              const key = cacheKeyFor(prefix, scope, portName, hash);
-              const zipPath = path.join(archivesDir, relPath);
-
-              try {
-                await cache.saveCache([zipPath], key);
-                saved++;
-              } catch (e) {
-                if (e.message && e.message.includes('already exists')) {
-                  core.debug(`Already cached: ${hash}`);
-                } else {
-                  throw e;
+                try {
+                  await cache.saveCache([zipPath], key);
+                  saved++;
+                } catch (e) {
+                  if (e.message && e.message.includes('already exists')) {
+                    core.debug(`Already cached: ${hash}`);
+                  } else {
+                    throw e;
+                  }
                 }
-              }
-            }),
-          );
+              }),
+            );
 
-          for (const r of results) {
-            if (r.status === 'rejected') {
-              core.warning(`Save failed: ${r.reason?.message || r.reason}`);
+            for (const r of results) {
+              if (r.status === 'rejected') {
+                core.warning(
+                  `Save failed: ${r.reason?.message || r.reason}`,
+                );
+              }
             }
           }
+        },
+      );
+      core.info(`Saved ${saved} new packages to cache`);
+    } else {
+      core.info('No new packages to cache');
+    }
+
+    // ---- Save manifest (list of all ABI hashes for cache-hit check) ----
+    if (currentFiles.size > 0) {
+      const allHashes = [...currentFiles].map(f => hashFromRelPath(f));
+      const mPath = manifestPath();
+      fs.mkdirSync(MANIFEST_DIR, { recursive: true });
+      fs.writeFileSync(mPath, JSON.stringify({ hashes: allHashes }));
+
+      const mKey = manifestKey(prefix, scope);
+      try {
+        await cache.saveCache([mPath], mKey);
+        core.info(`Saved manifest (${allHashes.length} packages)`);
+      } catch (e) {
+        if (e.message && e.message.includes('already exists')) {
+          core.debug('Manifest already cached for this run');
+        } else {
+          core.warning(`Failed to save manifest: ${e.message}`);
         }
-      },
-    );
-    core.info(`Saved ${saved} new packages to cache`);
+      }
+    }
   } catch (err) {
     core.warning(`vcpkg cache save failed: ${err.message}`);
   }
