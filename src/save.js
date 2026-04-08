@@ -18,17 +18,25 @@ const CONCURRENCY = 10;
 
 function findInstalledDir() {
   const input = core.getInput('installed-dir');
-  if (input && fs.existsSync(path.join(input, 'vcpkg', 'status'))) return input;
+  if (input) {
+    const statusPath = path.join(input, 'vcpkg', 'status');
+    if (fs.existsSync(statusPath)) return input;
+    core.debug(`installed-dir input set to "${input}" but ${statusPath} not found`);
+  }
 
   // Check VCPKG_INSTALLED_DIR env var (set by cmake presets, --x-install-root, etc.)
   const envDir = process.env.VCPKG_INSTALLED_DIR;
-  if (envDir && fs.existsSync(path.join(envDir, 'vcpkg', 'status')))
-    return envDir;
+  if (envDir) {
+    const statusPath = path.join(envDir, 'vcpkg', 'status');
+    if (fs.existsSync(statusPath)) return envDir;
+    core.debug(`VCPKG_INSTALLED_DIR="${envDir}" but ${statusPath} not found`);
+  }
 
   const workspace = process.env.GITHUB_WORKSPACE || process.cwd();
   const candidate = path.join(workspace, 'vcpkg_installed');
   if (fs.existsSync(path.join(candidate, 'vcpkg', 'status'))) return candidate;
 
+  core.debug('Could not find vcpkg_installed status database');
   return null;
 }
 
