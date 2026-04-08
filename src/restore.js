@@ -186,7 +186,11 @@ async function run() {
     const mHit = await cache.restoreCache([mPath], mKey, [mRestoreKey]);
 
     // ---- List known cache entries via GitHub REST API ----
-    const allKeys = await listCacheKeys(`${keyPrefix}-`, token);
+    // List ALL entries with the prefix, not scoped — vcpkg's ABI hashing
+    // handles correctness, so restoring old-scope entries is harmless and
+    // avoids unnecessary rebuilds when only the scope changes (e.g., an
+    // overlay port edit that doesn't affect most packages).
+    const allKeys = await listCacheKeys(`${prefix}-`, token);
 
     // Deduplicate: extract ABI hash from key (last 64 hex chars)
     const seen = new Set();
