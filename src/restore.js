@@ -7,6 +7,10 @@ const {
   snapshotArchives,
   hashFromCacheKey,
   computeScope,
+  manifestPath,
+  manifestKey,
+  manifestRestoreKey,
+  MANIFEST_DIR,
 } = require('./common');
 
 const CONCURRENCY = 10;
@@ -54,11 +58,16 @@ async function run() {
     const prefix = core.getInput('cache-key-prefix') || 'vcpkg-pkg';
     const vcpkgRoot = core.getInput('vcpkg-root') || '';
     const overlayPorts = core.getInput('overlay-ports') || '';
+    const extraKey = core.getInput('key') || '';
     const saveCache = core.getInput('save-cache') !== 'false';
     const archivesDir = getArchivesDir();
 
-    // ---- Compute scope from vcpkg commit + overlay ports ----
-    const scope = computeScope(vcpkgRoot || null, overlayPorts || null);
+    // ---- Compute scope from vcpkg commit + overlay ports + key ----
+    const scope = computeScope(
+      vcpkgRoot || null,
+      overlayPorts || null,
+      extraKey || null,
+    );
     const keyPrefix = scope ? `${prefix}-${scope}` : prefix;
 
     if (vcpkgRoot && !scope) {
@@ -69,11 +78,19 @@ async function run() {
 
     fs.mkdirSync(archivesDir, { recursive: true });
 
+    // ---- Check manifest for cache-hit ----
+    let cacheHit = false;
+    fs.mkdirSync(MANIFEST_DIR, { recursive: true });
+    const mPath = manifestPath();
+    const mKey = manifestKey(prefix, scope);
+    const mRestoreKey = manifestRestoreKey(prefix, scope);
+
+    const mHit = await cache.restoreCache([mPath], mKey, [mRestoreKey]);
+
     // ---- List known cache entries via GitHub REST API ----
     const allKeys = await listCacheKeys(`${keyPrefix}-`, token);
 
-    // Deduplicate: extract ABI hash from key (last 64 hex chars),
-    // works for both named and unnamed key formats.
+    // Deduplicate: extract ABI hash from key (last 64 hex chars)
     const seen = new Set();
     const tasks = [];
     for (const key of allKeys) {
@@ -81,6 +98,46 @@ async function run() {
       if (!hash || seen.has(hash)) continue;
       seen.add(hash);
       tasks.push({ key, hash });
+    }
+
+    // ---- Evaluate cache-hit against manifest ----
+    if (mHit && fs.existsSync(mPath)) {
+      try {
+        const manifest = JSON.parse(fs.readFileSync(mPath, 'utf-8'));
+        const expected = manifest.hashes || [];
+        if (expected.length > 0) {
+          const missing = expected.filter(h => !seen.has(h));
+          cacheHit = missing.length === 0;
+          if (cacheHit) {
+            core.info(
+              `Cache hit — all ${expected.length} packages present`,
+            );
+          } else {
+            core.info(
+              `Cache miss — ${missing.length}/${expected.length} packages missing`,
+            );
+          }
+        }
+      } catch {
+        core.debug('Failed to parse manifest');
+      }
+    }
+
+    core.setOutput('cache-hit', cacheHit ? 'true' : 'false');
+
+    // ---- Builder can skip restore when cache is complete ----
+    if (cacheHit && saveCache) {
+      core.saveState('save-cache', 'true');
+      core.saveState('archives-dir', archivesDir);
+      core.saveState('scope', scope);
+      core.saveState('prefix', prefix);
+      const mode = 'readwrite';
+      core.setOutput('archives-dir', archivesDir);
+      core.exportVariable(
+        'VCPKG_BINARY_SOURCES',
+        `files,${archivesDir},${mode}`,
+      );
+      return;
     }
 
     // ---- Restore each package in batches ----

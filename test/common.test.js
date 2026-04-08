@@ -250,7 +250,7 @@ describe('computeScope', () => {
   };
 
   test('returns empty string when no inputs', () => {
-    expect(computeScope(null, null)).toBe('');
+    expect(computeScope(null, null, null)).toBe('');
   });
 
   test('returns 8-char hex when given a git repo', () => {
@@ -295,6 +295,35 @@ describe('computeScope', () => {
     });
     const s2 = computeScope(dir, null);
     expect(s1).not.toBe(s2);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  test('changes when extra key changes', () => {
+    const s1 = computeScope(null, null, 'llvm-19');
+    const s2 = computeScope(null, null, 'llvm-20');
+    expect(s1).toMatch(/^[0-9a-f]{8}$/);
+    expect(s2).toMatch(/^[0-9a-f]{8}$/);
+    expect(s1).not.toBe(s2);
+  });
+
+  test('extra key supports multiline', () => {
+    const single = computeScope(null, null, 'llvm-20\ndeps-foo bar');
+    const different = computeScope(null, null, 'llvm-20\ndeps-foo baz');
+    expect(single).toMatch(/^[0-9a-f]{8}$/);
+    expect(single).not.toBe(different);
+  });
+
+  test('mixes extra key with vcpkg commit', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'scope-mixed-'));
+    execSync('git init', { cwd: dir, stdio: 'pipe' });
+    execSync('git commit --allow-empty -m "init"', {
+      cwd: dir,
+      stdio: 'pipe',
+      env: gitEnv,
+    });
+    const withKey = computeScope(dir, null, 'llvm-20');
+    const withoutKey = computeScope(dir, null);
+    expect(withKey).not.toBe(withoutKey);
     fs.rmSync(dir, { recursive: true, force: true });
   });
 });

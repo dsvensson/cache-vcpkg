@@ -24,10 +24,15 @@ inputs:
   save-cache:
     description: 'Save new packages to cache in the post step. Set to false for consumer jobs that only restore.'
     default: 'true'
+  key:
+    description: 'Extra key mixed into the cache scope. Use to include compiler version, system packages, or other factors that affect ABI. Supports multiline (one entry per line).'
+    required: false
 
 outputs:
   archives-dir:
     description: 'Absolute path to the vcpkg binary archives directory'
+  cache-hit:
+    description: 'Whether all packages from the last successful build are still present in the cache'
 
 runs:
   using: 'node24'

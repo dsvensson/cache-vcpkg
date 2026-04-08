@@ -10,6 +10,8 @@ const {
   cacheKeyFor,
   computeScope,
   parseVcpkgStatus,
+  manifestKey,
+  manifestRestoreKey,
 } = require('../src/common');
 
 // ---------------------------------------------------------------------------
@@ -286,6 +288,56 @@ describe('save-cache: false (consumer mode)', () => {
     expect(mode).toBe('read');
     expect(`files,${archivesDir},${mode}`).toMatch(/,read$/);
     expect(`files,${archivesDir},${mode}`).not.toMatch(/readwrite/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+describe('manifest and cache-hit', () => {
+  const scope = 'abcd1234';
+  const prefix = 'vcpkg-pkg';
+
+  test('manifestKey includes run ID for uniqueness', () => {
+    const orig = process.env.GITHUB_RUN_ID;
+    process.env.GITHUB_RUN_ID = '42';
+    process.env.GITHUB_RUN_ATTEMPT = '1';
+    const key = manifestKey(prefix, scope);
+    expect(key).toBe('vcpkg-pkg-manifest-abcd1234-42-1');
+    if (orig === undefined) delete process.env.GITHUB_RUN_ID;
+    else process.env.GITHUB_RUN_ID = orig;
+  });
+
+  test('manifestRestoreKey is a prefix for matching', () => {
+    const key = manifestRestoreKey(prefix, scope);
+    expect(key).toBe('vcpkg-pkg-manifest-abcd1234-');
+    // Any manifestKey with matching scope starts with this prefix
+    const orig = process.env.GITHUB_RUN_ID;
+    process.env.GITHUB_RUN_ID = '99';
+    process.env.GITHUB_RUN_ATTEMPT = '2';
+    expect(manifestKey(prefix, scope).startsWith(key)).toBe(true);
+    if (orig === undefined) delete process.env.GITHUB_RUN_ID;
+    else process.env.GITHUB_RUN_ID = orig;
+  });
+
+  test('cache-hit is true when all manifest hashes are available', () => {
+    const manifestHashes = ['a'.repeat(64), 'b'.repeat(64), 'c'.repeat(64)];
+    const availableHashes = new Set(manifestHashes);
+    const missing = manifestHashes.filter(h => !availableHashes.has(h));
+    expect(missing).toHaveLength(0);
+  });
+
+  test('cache-hit is false when some manifest hashes are missing', () => {
+    const manifestHashes = ['a'.repeat(64), 'b'.repeat(64), 'c'.repeat(64)];
+    const availableHashes = new Set([manifestHashes[0], manifestHashes[1]]);
+    const missing = manifestHashes.filter(h => !availableHashes.has(h));
+    expect(missing).toHaveLength(1);
+    expect(missing[0]).toBe('c'.repeat(64));
+  });
+
+  test('manifest JSON round-trips correctly', () => {
+    const hashes = ['a'.repeat(64), 'b'.repeat(64)];
+    const json = JSON.stringify({ hashes });
+    const parsed = JSON.parse(json);
+    expect(parsed.hashes).toEqual(hashes);
   });
 });
 

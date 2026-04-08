@@ -63,21 +63,36 @@ so overlay packages (and their dependents) are rebuilt.
 
 ### Multi-job workflow (builder + consumers)
 
-Use `save-cache: false` on consumer jobs so only the builder writes to cache.
-This avoids races and keeps cache writes predictable.
+Use a dedicated builder job to populate the cache, then consumer jobs
+restore from it. The builder checks `cache-hit` to skip the toolchain
+install and vcpkg build entirely when nothing has changed.
 
 ```yaml
+env:
+  LLVM_VERSION: "20"
+  PACKAGES: "build-essential libx11-dev libwayland-dev"
+
 jobs:
   vcpkg-cache:
     runs-on: ubuntu-latest
+    outputs:
+      cache-hit: ${{ steps.cache.outputs.cache-hit }}
     steps:
       - uses: actions/checkout@v6
         with:
           submodules: true
       - uses: your-org/cache-vcpkg@v1
+        id: cache
         with:
           vcpkg-root: vcpkg
-      - run: ./vcpkg/vcpkg install
+          key: |
+            llvm-${{ env.LLVM_VERSION }}
+            deps-${{ env.PACKAGES }}
+      # Everything below only runs on cache miss
+      - if: steps.cache.outputs.cache-hit != 'true'
+        run: apt-get install -y $PACKAGES
+      - if: steps.cache.outputs.cache-hit != 'true'
+        run: ./vcpkg/vcpkg install
 
   build-target-a:
     needs: vcpkg-cache
@@ -90,6 +105,9 @@ jobs:
         with:
           vcpkg-root: vcpkg
           save-cache: false
+          key: |
+            llvm-${{ env.LLVM_VERSION }}
+            deps-${{ env.PACKAGES }}
       - run: cmake --preset target-a && cmake --build --preset target-a
 
   build-target-b:
@@ -103,12 +121,18 @@ jobs:
         with:
           vcpkg-root: vcpkg
           save-cache: false
+          key: |
+            llvm-${{ env.LLVM_VERSION }}
+            deps-${{ env.PACKAGES }}
       - run: cmake --preset target-b && cmake --build --preset target-b
 ```
 
-The builder job restores what's available, builds any missing packages,
-and saves the new entries. Consumer jobs restore everything (now fully cached)
-and set `VCPKG_BINARY_SOURCES` to read-only so vcpkg never writes archives.
+On cache hit, the builder does nothing beyond two cheap API calls (manifest
+check + cache key listing). Consumer jobs restore the packages and set
+`VCPKG_BINARY_SOURCES` to read-only.
+
+The `key` input is mixed into the cache scope — changing LLVM version or
+system packages invalidates the cache, forcing a rebuild.
 
 ### CMake preset workflow
 
@@ -141,12 +165,14 @@ is all that is needed for caching to work.
 | `overlay-ports` | _(none)_ | Path to an overlay ports directory. Scopes the cache to a content hash of all files in it. |
 | `installed-dir` | _(auto)_ | Path to `vcpkg_installed` directory. Used to resolve port names for cache keys. Auto-detected if not set. |
 | `save-cache` | `true` | Save new packages to cache in the post step. Set to `false` for consumer jobs that only restore. |
+| `key` | _(none)_ | Extra key mixed into the cache scope. Use to include compiler version, system packages, or other factors that affect ABI. Supports multiline (one entry per line). |
 
 ## Outputs
 
 | Name | Description |
 |------|-------------|
 | `archives-dir` | Absolute path to the vcpkg binary archives directory. |
+| `cache-hit` | Whether all packages from the last successful build are still present in the cache. |
 
 ## Cache invalidation
 

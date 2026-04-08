@@ -98,10 +98,11 @@ function hashDirectory(dir) {
 }
 
 /**
- * Build an 8-char hex scope from the vcpkg commit and/or overlay contents.
- * Returns '' when neither input is provided.
+ * Build an 8-char hex scope from the vcpkg commit, overlay contents, and
+ * an optional user-supplied key string.
+ * Returns '' when no inputs are provided.
  */
-function computeScope(vcpkgRoot, overlayPorts) {
+function computeScope(vcpkgRoot, overlayPorts, extraKey) {
   const parts = [];
 
   if (vcpkgRoot) {
@@ -114,6 +115,8 @@ function computeScope(vcpkgRoot, overlayPorts) {
     parts.push(`overlay:${dirHash}`);
   }
 
+  if (extraKey) parts.push(`key:${extraKey}`);
+
   if (parts.length === 0) return '';
 
   return crypto
@@ -121,6 +124,27 @@ function computeScope(vcpkgRoot, overlayPorts) {
     .update(parts.join('\n'))
     .digest('hex')
     .slice(0, 8);
+}
+
+// ---------------------------------------------------------------------------
+// Manifest — records the set of ABI hashes from the last successful build.
+// Used to determine cache-hit without restoring every package.
+// ---------------------------------------------------------------------------
+
+const MANIFEST_DIR = path.join(os.tmpdir(), 'vcpkg-cache-meta');
+
+function manifestPath() {
+  return path.join(MANIFEST_DIR, 'manifest.json');
+}
+
+function manifestKey(prefix, scope) {
+  const runId = process.env.GITHUB_RUN_ID || 'local';
+  const attempt = process.env.GITHUB_RUN_ATTEMPT || '1';
+  return `${prefix}-manifest-${scope}-${runId}-${attempt}`;
+}
+
+function manifestRestoreKey(prefix, scope) {
+  return `${prefix}-manifest-${scope}-`;
 }
 
 // ---------------------------------------------------------------------------
@@ -165,5 +189,9 @@ module.exports = {
   getVcpkgCommit,
   hashDirectory,
   computeScope,
+  manifestPath,
+  manifestKey,
+  manifestRestoreKey,
+  MANIFEST_DIR,
   parseVcpkgStatus,
 };
