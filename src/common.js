@@ -132,6 +132,7 @@ function computeScope(vcpkgRoot, overlayPorts, extraKey) {
 // ---------------------------------------------------------------------------
 
 const MANIFEST_DIR = path.join(os.tmpdir(), 'vcpkg-cache-meta');
+const BUILD_OK_MARKER = path.join(MANIFEST_DIR, 'build-ok');
 
 function manifestPath() {
   return path.join(MANIFEST_DIR, 'manifest.json');
@@ -193,5 +194,6 @@ module.exports = {
   manifestKey,
   manifestRestoreKey,
   MANIFEST_DIR,
+  BUILD_OK_MARKER,
   parseVcpkgStatus,
 };

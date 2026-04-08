@@ -12,6 +12,7 @@ const {
   manifestKey,
   manifestRestoreKey,
   MANIFEST_DIR,
+  BUILD_OK_MARKER,
 } = require('./common');
 
 const CONCURRENCY = 10;
@@ -251,16 +252,28 @@ async function run() {
       `files,${archivesDir},${mode}`,
     );
 
+    // Export marker path so the workflow can signal build success:
+    //   touch "$VCPKG_CACHE_COMPLETE"
+    // The post step only saves the manifest if this file exists.
+    fs.mkdirSync(MANIFEST_DIR, { recursive: true });
+    core.exportVariable('VCPKG_CACHE_COMPLETE', BUILD_OK_MARKER);
+
     // ---- Run command if specified ----
     const runCmd = core.getInput('run');
     if (runCmd) {
       if (skipRestore) {
         core.info('Skipping run — cache is complete');
-        core.saveState('build-ok', 'true');
+        fs.writeFileSync(BUILD_OK_MARKER, '');
       } else {
         const ok = await executeCommand(runCmd);
-        core.saveState('build-ok', ok ? 'true' : 'false');
+        if (ok) fs.writeFileSync(BUILD_OK_MARKER, '');
       }
+    }
+
+    // When cache-hit skipped the build entirely, the previous
+    // manifest is still valid — mark as ok so it gets refreshed.
+    if (skipRestore && !runCmd) {
+      fs.writeFileSync(BUILD_OK_MARKER, '');
     }
   } catch (err) {
     // Never fail the build for cache issues
