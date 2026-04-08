@@ -109,10 +109,44 @@ function executeCommand(cmd) {
         }
       }
 
+      // Dump installed directory structure for debugging triplet/path issues
+      dumpInstalledDirs();
+
       core.setFailed(`Command failed with exit code ${code}: ${cmd}`);
       resolve(false);
     });
   });
+}
+
+function dumpInstalledDirs() {
+  const bases = [
+    process.env.GITHUB_WORKSPACE,
+    process.env.RUNNER_TEMP,
+  ].filter(Boolean);
+
+  for (const base of bases) {
+    const installed = path.join(base, 'vcpkg_installed');
+    if (!fs.existsSync(installed)) continue;
+
+    core.startGroup(`Installed directory: ${installed}`);
+    try {
+      listDirTree(installed, '');
+    } catch {
+      core.info('(could not list directory)');
+    }
+    core.endGroup();
+  }
+}
+
+function listDirTree(dir, indent) {
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    if (entry.isDirectory()) {
+      core.info(`${indent}${entry.name}/`);
+      listDirTree(path.join(dir, entry.name), indent + '  ');
+    } else {
+      core.info(`${indent}${entry.name}`);
+    }
+  }
 }
 
 async function run() {

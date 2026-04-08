@@ -36,8 +36,36 @@ function findInstalledDir() {
   const candidate = path.join(workspace, 'vcpkg_installed');
   if (fs.existsSync(path.join(candidate, 'vcpkg', 'status'))) return candidate;
 
-  core.debug('Could not find vcpkg_installed status database');
+  // Dump what we can see to help diagnose
+  core.info('Could not find vcpkg status database for port name resolution');
+  for (const base of [
+    input,
+    envDir,
+    path.join(workspace, 'vcpkg_installed'),
+    process.env.RUNNER_TEMP && path.join(process.env.RUNNER_TEMP, 'vcpkg_installed'),
+  ].filter(Boolean)) {
+    if (fs.existsSync(base)) {
+      core.startGroup(`Directory listing: ${base}`);
+      try {
+        listDirShallow(base);
+      } catch { /* ignore */ }
+      core.endGroup();
+    }
+  }
   return null;
+}
+
+function listDirShallow(dir) {
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    core.info(entry.isDirectory() ? `${entry.name}/` : entry.name);
+    if (entry.isDirectory()) {
+      try {
+        for (const sub of fs.readdirSync(path.join(dir, entry.name), { withFileTypes: true })) {
+          core.info(`  ${sub.isDirectory() ? sub.name + '/' : sub.name}`);
+        }
+      } catch { /* ignore */ }
+    }
+  }
 }
 
 async function run() {
