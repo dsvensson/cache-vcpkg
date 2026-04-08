@@ -83241,18 +83241,54 @@ const CONCURRENCY = 10;
 
 function findInstalledDir() {
   const input = core.getInput('installed-dir');
-  if (input && fs.existsSync(path.join(input, 'vcpkg', 'status'))) return input;
+  if (input) {
+    const statusPath = path.join(input, 'vcpkg', 'status');
+    if (fs.existsSync(statusPath)) return input;
+    core.debug(`installed-dir input set to "${input}" but ${statusPath} not found`);
+  }
 
   // Check VCPKG_INSTALLED_DIR env var (set by cmake presets, --x-install-root, etc.)
   const envDir = process.env.VCPKG_INSTALLED_DIR;
-  if (envDir && fs.existsSync(path.join(envDir, 'vcpkg', 'status')))
-    return envDir;
+  if (envDir) {
+    const statusPath = path.join(envDir, 'vcpkg', 'status');
+    if (fs.existsSync(statusPath)) return envDir;
+    core.debug(`VCPKG_INSTALLED_DIR="${envDir}" but ${statusPath} not found`);
+  }
 
   const workspace = process.env.GITHUB_WORKSPACE || process.cwd();
   const candidate = path.join(workspace, 'vcpkg_installed');
   if (fs.existsSync(path.join(candidate, 'vcpkg', 'status'))) return candidate;
 
+  // Dump what we can see to help diagnose
+  core.info('Could not find vcpkg status database for port name resolution');
+  for (const base of [
+    input,
+    envDir,
+    path.join(workspace, 'vcpkg_installed'),
+    process.env.RUNNER_TEMP && path.join(process.env.RUNNER_TEMP, 'vcpkg_installed'),
+  ].filter(Boolean)) {
+    if (fs.existsSync(base)) {
+      core.startGroup(`Directory listing: ${base}`);
+      try {
+        listDirShallow(base);
+      } catch { /* ignore */ }
+      core.endGroup();
+    }
+  }
   return null;
+}
+
+function listDirShallow(dir) {
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    core.info(entry.isDirectory() ? `${entry.name}/` : entry.name);
+    if (entry.isDirectory()) {
+      try {
+        for (const sub of fs.readdirSync(path.join(dir, entry.name), { withFileTypes: true })) {
+          core.info(`  ${sub.isDirectory() ? sub.name + '/' : sub.name}`);
+        }
+      } catch { /* ignore */ }
+    }
+  }
 }
 
 async function run() {
