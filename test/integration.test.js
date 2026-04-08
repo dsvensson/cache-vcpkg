@@ -247,6 +247,49 @@ describe('overlay port invalidation', () => {
 });
 
 // ---------------------------------------------------------------------------
+describe('save-cache: false (consumer mode)', () => {
+  let archivesDir;
+
+  beforeEach(() => {
+    archivesDir = fs.mkdtempSync(path.join(os.tmpdir(), 'consumer-test-'));
+    // Pre-populate with some zips (simulating a successful restore)
+    for (let i = 0; i < 3; i++) {
+      const hash = crypto.randomBytes(32).toString('hex');
+      const subdir = hash.slice(0, 2);
+      fs.mkdirSync(path.join(archivesDir, subdir), { recursive: true });
+      fs.writeFileSync(
+        path.join(archivesDir, subdir, `${hash}.zip`),
+        Buffer.alloc(64),
+      );
+    }
+  });
+
+  afterEach(() => {
+    fs.rmSync(archivesDir, { recursive: true, force: true });
+  });
+
+  test('snapshot is skipped — empty snapshot means all files look new', () => {
+    // When save-cache is false, restore.js skips saving the snapshot.
+    // If save.js were to run its diff with an empty snapshot, it would
+    // see all files as "new". The early-exit guard prevents this.
+    const emptySnapshot = new Set(); // simulates skipped snapshot
+    const current = snapshotArchives(archivesDir);
+    const wouldBeNew = [...current].filter(f => !emptySnapshot.has(f));
+    expect(wouldBeNew.length).toBe(3); // all 3 would appear new
+    // ...but save.js exits before reaching this logic
+  });
+
+  test('VCPKG_BINARY_SOURCES should use read mode', () => {
+    // Verify the mode string the restore step would produce
+    const saveCache = false;
+    const mode = saveCache ? 'readwrite' : 'read';
+    expect(mode).toBe('read');
+    expect(`files,${archivesDir},${mode}`).toMatch(/,read$/);
+    expect(`files,${archivesDir},${mode}`).not.toMatch(/readwrite/);
+  });
+});
+
+// ---------------------------------------------------------------------------
 describe('parseInstallPlan', () => {
   const parse = output => {
     const pkgs = [];

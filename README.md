@@ -61,6 +61,55 @@ When `overlay-ports` is set, the cache is also scoped to a content hash
 of that directory. Editing any overlay port file invalidates the cache
 so overlay packages (and their dependents) are rebuilt.
 
+### Multi-job workflow (builder + consumers)
+
+Use `save-cache: false` on consumer jobs so only the builder writes to cache.
+This avoids races and keeps cache writes predictable.
+
+```yaml
+jobs:
+  vcpkg-cache:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: true
+      - uses: your-org/cache-vcpkg@v1
+        with:
+          vcpkg-root: vcpkg
+      - run: ./vcpkg/vcpkg install
+
+  build-target-a:
+    needs: vcpkg-cache
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: true
+      - uses: your-org/cache-vcpkg@v1
+        with:
+          vcpkg-root: vcpkg
+          save-cache: false
+      - run: cmake --preset target-a && cmake --build --preset target-a
+
+  build-target-b:
+    needs: vcpkg-cache
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: true
+      - uses: your-org/cache-vcpkg@v1
+        with:
+          vcpkg-root: vcpkg
+          save-cache: false
+      - run: cmake --preset target-b && cmake --build --preset target-b
+```
+
+The builder job restores what's available, builds any missing packages,
+and saves the new entries. Consumer jobs restore everything (now fully cached)
+and set `VCPKG_BINARY_SOURCES` to read-only so vcpkg never writes archives.
+
 ### CMake preset workflow
 
 ```yaml
@@ -90,6 +139,8 @@ is all that is needed for caching to work.
 | `cache-key-prefix` | `vcpkg-pkg` | Prefix for all cache keys. Change this to isolate independent cache sets. |
 | `vcpkg-root` | _(none)_ | Path to the vcpkg checkout. Scopes the cache to its commit hash. |
 | `overlay-ports` | _(none)_ | Path to an overlay ports directory. Scopes the cache to a content hash of all files in it. |
+| `installed-dir` | _(auto)_ | Path to `vcpkg_installed` directory. Used to resolve port names for cache keys. Auto-detected if not set. |
+| `save-cache` | `true` | Save new packages to cache in the post step. Set to `false` for consumer jobs that only restore. |
 
 ## Outputs
 

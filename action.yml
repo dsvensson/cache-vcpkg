@@ -21,6 +21,9 @@ inputs:
   installed-dir:
     description: 'Path to vcpkg_installed directory. Used to resolve port names for cache keys. Auto-detected from $GITHUB_WORKSPACE/vcpkg_installed if not set.'
     required: false
+  save-cache:
+    description: 'Save new packages to cache in the post step. Set to false for consumer jobs that only restore.'
+    default: 'true'
 
 outputs:
   archives-dir:
