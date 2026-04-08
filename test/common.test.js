@@ -408,4 +408,58 @@ describe('parseVcpkgStatus', () => {
 
     expect(parseVcpkgStatus(tmpDir).size).toBe(0);
   });
+
+  test('reads from updates/ directory when status file is missing', () => {
+    const hash1 = 'e'.repeat(64);
+    const hash2 = 'f'.repeat(64);
+    fs.mkdirSync(path.join(tmpDir, 'vcpkg', 'updates'), { recursive: true });
+    fs.writeFileSync(
+      path.join(tmpDir, 'vcpkg', 'updates', '0000000000'),
+      [
+        `Package: zlib`,
+        `Abi: ${hash1}`,
+        `Status: install ok installed`,
+      ].join('\n'),
+    );
+    fs.writeFileSync(
+      path.join(tmpDir, 'vcpkg', 'updates', '0000000001'),
+      [
+        `Package: openssl`,
+        `Abi: ${hash2}`,
+        `Status: install ok installed`,
+      ].join('\n'),
+    );
+
+    const map = parseVcpkgStatus(tmpDir);
+    expect(map.size).toBe(2);
+    expect(map.get(hash1)).toBe('zlib');
+    expect(map.get(hash2)).toBe('openssl');
+  });
+
+  test('merges status file and updates/ directory', () => {
+    const hash1 = '1'.repeat(64);
+    const hash2 = '2'.repeat(64);
+    fs.writeFileSync(
+      path.join(tmpDir, 'vcpkg', 'status'),
+      [
+        `Package: zlib`,
+        `Abi: ${hash1}`,
+        `Status: install ok installed`,
+      ].join('\n'),
+    );
+    fs.mkdirSync(path.join(tmpDir, 'vcpkg', 'updates'), { recursive: true });
+    fs.writeFileSync(
+      path.join(tmpDir, 'vcpkg', 'updates', '0000000000'),
+      [
+        `Package: openssl`,
+        `Abi: ${hash2}`,
+        `Status: install ok installed`,
+      ].join('\n'),
+    );
+
+    const map = parseVcpkgStatus(tmpDir);
+    expect(map.size).toBe(2);
+    expect(map.get(hash1)).toBe('zlib');
+    expect(map.get(hash2)).toBe('openssl');
+  });
 });

@@ -16,25 +16,26 @@ const {
 
 const CONCURRENCY = 10;
 
+function hasVcpkgDir(dir) {
+  const vcpkgDir = path.join(dir, 'vcpkg');
+  try {
+    return fs.statSync(vcpkgDir).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
 function findInstalledDir() {
   const input = core.getInput('installed-dir');
-  if (input) {
-    const statusPath = path.join(input, 'vcpkg', 'status');
-    if (fs.existsSync(statusPath)) return input;
-    core.debug(`installed-dir input set to "${input}" but ${statusPath} not found`);
-  }
+  if (input && hasVcpkgDir(input)) return input;
 
   // Check VCPKG_INSTALLED_DIR env var (set by cmake presets, --x-install-root, etc.)
   const envDir = process.env.VCPKG_INSTALLED_DIR;
-  if (envDir) {
-    const statusPath = path.join(envDir, 'vcpkg', 'status');
-    if (fs.existsSync(statusPath)) return envDir;
-    core.debug(`VCPKG_INSTALLED_DIR="${envDir}" but ${statusPath} not found`);
-  }
+  if (envDir && hasVcpkgDir(envDir)) return envDir;
 
   const workspace = process.env.GITHUB_WORKSPACE || process.cwd();
   const candidate = path.join(workspace, 'vcpkg_installed');
-  if (fs.existsSync(path.join(candidate, 'vcpkg', 'status'))) return candidate;
+  if (hasVcpkgDir(candidate)) return candidate;
 
   // Dump what we can see to help diagnose
   core.info('Could not find vcpkg status database for port name resolution');
