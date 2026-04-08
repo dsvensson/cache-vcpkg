@@ -1,5 +1,6 @@
 const core = require('@actions/core');
 const cache = require('@actions/cache');
+const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const {
@@ -49,6 +50,68 @@ async function listCacheKeys(listPrefix, token) {
   }
 
   return keys;
+}
+
+/**
+ * Spawn a command, stream output in real-time, and on failure dump any
+ * log files referenced in the output as collapsible groups.
+ * Returns true on success, false on failure (after calling core.setFailed).
+ */
+function executeCommand(cmd) {
+  return new Promise(resolve => {
+    core.info(`Running: ${cmd}`);
+    const child = spawn(cmd, {
+      shell: true,
+      stdio: ['inherit', 'pipe', 'pipe'],
+      cwd: process.env.GITHUB_WORKSPACE || process.cwd(),
+      env: process.env,
+    });
+
+    let output = '';
+    child.stdout.on('data', data => {
+      process.stdout.write(data);
+      output += data.toString();
+    });
+    child.stderr.on('data', data => {
+      process.stderr.write(data);
+      output += data.toString();
+    });
+
+    child.on('error', err => {
+      core.setFailed(`Failed to start command: ${err.message}`);
+      resolve(false);
+    });
+
+    child.on('close', code => {
+      if (code === 0) {
+        resolve(true);
+        return;
+      }
+
+      // Extract log file paths referenced in vcpkg error output
+      const logPaths = new Set();
+      for (const line of output.split('\n')) {
+        const m = line.match(
+          /^\s+((?:\/|[A-Za-z]:[/\\])\S+\.log)\s*$/,
+        );
+        if (m) logPaths.add(m[1]);
+      }
+
+      for (const logPath of logPaths) {
+        try {
+          const content = fs.readFileSync(logPath, 'utf-8');
+          core.startGroup(`Build log: ${logPath}`);
+          core.info(content);
+          core.endGroup();
+        } catch {
+          core.warning(`Could not read log file: ${logPath}`);
+        }
+      }
+
+      core.setFailed(`Command failed with exit code ${code}: ${cmd}`);
+      resolve(false);
+    });
+  });
 }
 
 async function run() {
@@ -125,54 +188,53 @@ async function run() {
 
     core.setOutput('cache-hit', cacheHit ? 'true' : 'false');
 
-    // ---- Builder can skip restore when cache is complete ----
-    if (cacheHit && saveCache) {
-      core.saveState('save-cache', 'true');
-      core.saveState('archives-dir', archivesDir);
-      core.saveState('scope', scope);
-      core.saveState('prefix', prefix);
-      const mode = 'readwrite';
-      core.setOutput('archives-dir', archivesDir);
-      core.exportVariable(
-        'VCPKG_BINARY_SOURCES',
-        `files,${archivesDir},${mode}`,
-      );
-      return;
-    }
+    // ---- Restore packages (skipped for builder when cache is complete) ----
+    const skipRestore = cacheHit && saveCache;
 
-    // ---- Restore each package in batches ----
-    let restored = 0;
-    await core.group(
-      `Restoring ${tasks.length} cached packages (scope: ${scope || 'none'})`,
-      async () => {
-        for (let i = 0; i < tasks.length; i += CONCURRENCY) {
-          const batch = tasks.slice(i, i + CONCURRENCY);
-          const results = await Promise.allSettled(
-            batch.map(async ({ key, hash }) => {
-              const subdir = hash.slice(0, 2);
-              const zipPath = path.join(archivesDir, subdir, `${hash}.zip`);
-              fs.mkdirSync(path.join(archivesDir, subdir), { recursive: true });
+    if (skipRestore) {
+      core.info('Skipping restore — cache is complete');
+    } else {
+      let restored = 0;
+      await core.group(
+        `Restoring ${tasks.length} cached packages (scope: ${scope || 'none'})`,
+        async () => {
+          for (let i = 0; i < tasks.length; i += CONCURRENCY) {
+            const batch = tasks.slice(i, i + CONCURRENCY);
+            const results = await Promise.allSettled(
+              batch.map(async ({ key, hash }) => {
+                const subdir = hash.slice(0, 2);
+                const zipPath = path.join(
+                  archivesDir,
+                  subdir,
+                  `${hash}.zip`,
+                );
+                fs.mkdirSync(path.join(archivesDir, subdir), {
+                  recursive: true,
+                });
 
-              const hit = await cache.restoreCache([zipPath], key);
-              if (hit) {
-                restored++;
-                return true;
+                const hit = await cache.restoreCache([zipPath], key);
+                if (hit) {
+                  restored++;
+                  return true;
+                }
+                return false;
+              }),
+            );
+            for (const r of results) {
+              if (r.status === 'rejected') {
+                core.warning(
+                  `Restore failed: ${r.reason?.message || r.reason}`,
+                );
               }
-              return false;
-            }),
-          );
-          for (const r of results) {
-            if (r.status === 'rejected') {
-              core.warning(`Restore failed: ${r.reason?.message || r.reason}`);
             }
           }
-        }
-      },
-    );
-    core.info(`Restored ${restored} / ${tasks.length} packages`);
+        },
+      );
+      core.info(`Restored ${restored} / ${tasks.length} packages`);
+    }
 
-    // ---- Snapshot current state so post step can diff ----
-    if (saveCache) {
+    // ---- Save state for post step ----
+    if (saveCache && !skipRestore) {
       const snapshot = Array.from(snapshotArchives(archivesDir));
       core.saveState('snapshot', JSON.stringify(snapshot));
     }
@@ -188,6 +250,18 @@ async function run() {
       'VCPKG_BINARY_SOURCES',
       `files,${archivesDir},${mode}`,
     );
+
+    // ---- Run command if specified ----
+    const runCmd = core.getInput('run');
+    if (runCmd) {
+      if (skipRestore) {
+        core.info('Skipping run — cache is complete');
+        core.saveState('build-ok', 'true');
+      } else {
+        const ok = await executeCommand(runCmd);
+        core.saveState('build-ok', ok ? 'true' : 'false');
+      }
+    }
   } catch (err) {
     // Never fail the build for cache issues
     core.warning(`vcpkg cache restore failed: ${err.message}`);

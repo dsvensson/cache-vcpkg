@@ -19,6 +19,11 @@ function findInstalledDir() {
   const input = core.getInput('installed-dir');
   if (input && fs.existsSync(path.join(input, 'vcpkg', 'status'))) return input;
 
+  // Check VCPKG_INSTALLED_DIR env var (set by cmake presets, --x-install-root, etc.)
+  const envDir = process.env.VCPKG_INSTALLED_DIR;
+  if (envDir && fs.existsSync(path.join(envDir, 'vcpkg', 'status')))
+    return envDir;
+
   const workspace = process.env.GITHUB_WORKSPACE || process.cwd();
   const candidate = path.join(workspace, 'vcpkg_installed');
   if (fs.existsSync(path.join(candidate, 'vcpkg', 'status'))) return candidate;
@@ -102,8 +107,12 @@ async function run() {
       core.info('No new packages to cache');
     }
 
-    // ---- Save manifest (list of all ABI hashes for cache-hit check) ----
-    if (currentFiles.size > 0) {
+    // ---- Save manifest only after a confirmed fully-successful build ----
+    // The manifest drives cache-hit — saving it after a partial failure
+    // would cause the next run to skip the build, leaving broken packages
+    // uncached.  Only the `run` input can confirm success (build-ok state).
+    const buildOk = core.getState('build-ok');
+    if (buildOk === 'true' && currentFiles.size > 0) {
       const allHashes = [...currentFiles].map(f => hashFromRelPath(f));
       const mPath = manifestPath();
       fs.mkdirSync(MANIFEST_DIR, { recursive: true });

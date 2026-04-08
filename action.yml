@@ -27,6 +27,9 @@ inputs:
   key:
     description: 'Extra key mixed into the cache scope. Use to include compiler version, system packages, or other factors that affect ABI. Supports multiline (one entry per line).'
     required: false
+  run:
+    description: 'Command to run after restoring cache (e.g., "vcpkg install"). On failure, referenced log files are dumped in collapsible sections, partial results are still cached, and the step fails.'
+    required: false
 
 outputs:
   archives-dir:
