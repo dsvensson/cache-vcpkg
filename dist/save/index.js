@@ -40524,6 +40524,7 @@ function computeScope(vcpkgRoot, overlayPorts, extraKey) {
 // ---------------------------------------------------------------------------
 
 const MANIFEST_DIR = path.join(os.tmpdir(), 'vcpkg-cache-meta');
+const BUILD_OK_MARKER = path.join(MANIFEST_DIR, 'build-ok');
 
 function manifestPath() {
   return path.join(MANIFEST_DIR, 'manifest.json');
@@ -40585,6 +40586,7 @@ module.exports = {
   manifestKey,
   manifestRestoreKey,
   MANIFEST_DIR,
+  BUILD_OK_MARKER,
   parseVcpkgStatus,
 };
 
@@ -83232,6 +83234,7 @@ const {
   manifestPath,
   manifestKey,
   MANIFEST_DIR,
+  BUILD_OK_MARKER,
 } = __nccwpck_require__(5128);
 
 const CONCURRENCY = 10;
@@ -83331,9 +83334,14 @@ async function run() {
     // ---- Save manifest only after a confirmed fully-successful build ----
     // The manifest drives cache-hit — saving it after a partial failure
     // would cause the next run to skip the build, leaving broken packages
-    // uncached.  Only the `run` input can confirm success (build-ok state).
-    const buildOk = core.getState('build-ok');
-    if (buildOk === 'true' && currentFiles.size > 0) {
+    // uncached.
+    //
+    // Success is signalled by the marker file at $VCPKG_CACHE_COMPLETE:
+    //   - The `run` input creates it automatically on exit code 0
+    //   - Without `run`, the workflow touches it:  touch "$VCPKG_CACHE_COMPLETE"
+    //   - Builder cache-hit (skip path) creates it because the old manifest is valid
+    const buildOk = fs.existsSync(BUILD_OK_MARKER);
+    if (buildOk && currentFiles.size > 0) {
       const allHashes = [...currentFiles].map(f => hashFromRelPath(f));
       const mPath = manifestPath();
       fs.mkdirSync(MANIFEST_DIR, { recursive: true });
