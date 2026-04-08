@@ -40545,16 +40545,36 @@ function manifestRestoreKey(prefix, scope) {
 // ---------------------------------------------------------------------------
 
 /**
- * Parse vcpkg's DPKG-style status file and return a Map<abiHash, portName>.
- * @param {string} installedDir  Path to vcpkg_installed (contains vcpkg/status)
+ * Parse vcpkg's DPKG-style status database and return a Map<abiHash, portName>.
+ * Reads both the consolidated status file and incremental updates/ directory,
+ * since vcpkg only compacts the status file after a fully successful install.
+ * @param {string} installedDir  Path to vcpkg_installed (contains vcpkg/)
  */
 function parseVcpkgStatus(installedDir) {
   const abiToPort = new Map();
-  const statusPath = path.join(installedDir, 'vcpkg', 'status');
+  const vcpkgDir = path.join(installedDir, 'vcpkg');
 
-  if (!fs.existsSync(statusPath)) return abiToPort;
+  // Read consolidated status file (may not exist after partial failure)
+  const statusPath = path.join(vcpkgDir, 'status');
+  if (fs.existsSync(statusPath)) {
+    parseStatusContent(fs.readFileSync(statusPath, 'utf-8'), abiToPort);
+  }
 
-  const content = fs.readFileSync(statusPath, 'utf-8');
+  // Read incremental update files (always written, even on partial failure)
+  const updatesDir = path.join(vcpkgDir, 'updates');
+  if (fs.existsSync(updatesDir)) {
+    for (const file of fs.readdirSync(updatesDir).sort()) {
+      const filePath = path.join(updatesDir, file);
+      if (fs.statSync(filePath).isFile()) {
+        parseStatusContent(fs.readFileSync(filePath, 'utf-8'), abiToPort);
+      }
+    }
+  }
+
+  return abiToPort;
+}
+
+function parseStatusContent(content, abiToPort) {
   for (const para of content.split(/\n\n+/)) {
     let pkg = null;
     let abi = null;
@@ -40569,8 +40589,6 @@ function parseVcpkgStatus(installedDir) {
 
     if (pkg && abi && installed) abiToPort.set(abi, pkg);
   }
-
-  return abiToPort;
 }
 
 module.exports = {

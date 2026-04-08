@@ -40545,16 +40545,36 @@ function manifestRestoreKey(prefix, scope) {
 // ---------------------------------------------------------------------------
 
 /**
- * Parse vcpkg's DPKG-style status file and return a Map<abiHash, portName>.
- * @param {string} installedDir  Path to vcpkg_installed (contains vcpkg/status)
+ * Parse vcpkg's DPKG-style status database and return a Map<abiHash, portName>.
+ * Reads both the consolidated status file and incremental updates/ directory,
+ * since vcpkg only compacts the status file after a fully successful install.
+ * @param {string} installedDir  Path to vcpkg_installed (contains vcpkg/)
  */
 function parseVcpkgStatus(installedDir) {
   const abiToPort = new Map();
-  const statusPath = path.join(installedDir, 'vcpkg', 'status');
+  const vcpkgDir = path.join(installedDir, 'vcpkg');
 
-  if (!fs.existsSync(statusPath)) return abiToPort;
+  // Read consolidated status file (may not exist after partial failure)
+  const statusPath = path.join(vcpkgDir, 'status');
+  if (fs.existsSync(statusPath)) {
+    parseStatusContent(fs.readFileSync(statusPath, 'utf-8'), abiToPort);
+  }
 
-  const content = fs.readFileSync(statusPath, 'utf-8');
+  // Read incremental update files (always written, even on partial failure)
+  const updatesDir = path.join(vcpkgDir, 'updates');
+  if (fs.existsSync(updatesDir)) {
+    for (const file of fs.readdirSync(updatesDir).sort()) {
+      const filePath = path.join(updatesDir, file);
+      if (fs.statSync(filePath).isFile()) {
+        parseStatusContent(fs.readFileSync(filePath, 'utf-8'), abiToPort);
+      }
+    }
+  }
+
+  return abiToPort;
+}
+
+function parseStatusContent(content, abiToPort) {
   for (const para of content.split(/\n\n+/)) {
     let pkg = null;
     let abi = null;
@@ -40569,8 +40589,6 @@ function parseVcpkgStatus(installedDir) {
 
     if (pkg && abi && installed) abiToPort.set(abi, pkg);
   }
-
-  return abiToPort;
 }
 
 module.exports = {
@@ -83239,25 +83257,26 @@ const {
 
 const CONCURRENCY = 10;
 
+function hasVcpkgDir(dir) {
+  const vcpkgDir = path.join(dir, 'vcpkg');
+  try {
+    return fs.statSync(vcpkgDir).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
 function findInstalledDir() {
   const input = core.getInput('installed-dir');
-  if (input) {
-    const statusPath = path.join(input, 'vcpkg', 'status');
-    if (fs.existsSync(statusPath)) return input;
-    core.debug(`installed-dir input set to "${input}" but ${statusPath} not found`);
-  }
+  if (input && hasVcpkgDir(input)) return input;
 
   // Check VCPKG_INSTALLED_DIR env var (set by cmake presets, --x-install-root, etc.)
   const envDir = process.env.VCPKG_INSTALLED_DIR;
-  if (envDir) {
-    const statusPath = path.join(envDir, 'vcpkg', 'status');
-    if (fs.existsSync(statusPath)) return envDir;
-    core.debug(`VCPKG_INSTALLED_DIR="${envDir}" but ${statusPath} not found`);
-  }
+  if (envDir && hasVcpkgDir(envDir)) return envDir;
 
   const workspace = process.env.GITHUB_WORKSPACE || process.cwd();
   const candidate = path.join(workspace, 'vcpkg_installed');
-  if (fs.existsSync(path.join(candidate, 'vcpkg', 'status'))) return candidate;
+  if (hasVcpkgDir(candidate)) return candidate;
 
   // Dump what we can see to help diagnose
   core.info('Could not find vcpkg status database for port name resolution');
